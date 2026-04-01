@@ -176,7 +176,15 @@ _csw_make_stub() {
 _csw_account_email() {
   local json="${_CSW_ACCOUNTS}/${1}/.claude.json"
   [[ -f "${json}" ]] || return
-  grep -o '"emailAddress": *"[^"]*"' "${json}" 2>/dev/null | head -1 | sed 's/.*": *"//' | sed 's/"$//'
+  local line email
+  while IFS= read -r line; do
+    if [[ "${line}" =~ \"emailAddress\" ]]; then
+      email="${line##*\"emailAddress\": \"}"
+      email="${email%%\"*}"
+      echo "${email}"
+      return
+    fi
+  done < "${json}"
 }
 
 _csw_find_project_account() {
@@ -443,18 +451,17 @@ _csw_cmd_status() {
     local pins_file="${_CSW_ACCOUNTS}/.pins/${acc}"
     [[ -f "${pins_file}" ]] || continue
 
-    local -a valid_paths=()
-    local path
-    while IFS= read -r path; do
-      [[ -z "${path}" ]] && continue
-      [[ -d "${path}" ]] && valid_paths+=("${path}")
+    local -a valid_paths=() proj_path
+    while IFS= read -r proj_path; do
+      [[ -z "${proj_path}" ]] && continue
+      [[ -d "${proj_path}" ]] && valid_paths+=("${proj_path}")
     done < "${pins_file}"
 
     [[ ${#valid_paths[@]} -eq 0 ]] && continue
 
     printf "    \033[2m[pinned]\033[0m\n"
-    for path in "${valid_paths[@]}"; do
-      printf "    \033[2m→\033[0m  %s\n" "${path}"
+    for proj_path in "${valid_paths[@]}"; do
+      printf "    \033[2m→\033[0m  %s\n" "${proj_path}"
     done
   done
 }
