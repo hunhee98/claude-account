@@ -176,15 +176,21 @@ _csw_account_email() {
 }
 
 _csw_find_project_account() {
-  local dir="${PWD}"
-  while [[ "${dir}" != "/" ]]; do
-    if [[ -f "${dir}/.claude-account" ]]; then
-      local val
-      val=$(<"${dir}/.claude-account")
-      echo "${val//[[:space:]]/}"
-      return 0
-    fi
-    dir=$(dirname "${dir}")
+  local current_dir="${PWD}"
+  local pins_dir="${_CSW_ACCOUNTS}/.pins"
+  [[ ! -d "${pins_dir}" ]] && return 1
+
+  local acc
+  for acc in "${pins_dir}"/*; do
+    [[ ! -f "${acc}" ]] && continue
+    local path
+    while IFS= read -r path; do
+      [[ -z "${path}" ]] && continue
+      if [[ "${current_dir}" == "${path}" ]] || [[ "${current_dir}" == "${path}"/* ]]; then
+        basename "${acc}"
+        return 0
+      fi
+    done < "${acc}"
   done
   return 1
 }
@@ -280,9 +286,6 @@ _csw_cmd_pin() {
     return 1
   fi
 
-  local current_pin=""
-  [[ -f ".claude-account" ]] && current_pin=$(cat .claude-account)
-
   local header
   header="$(_csw_msg select_pin)"
 
@@ -290,9 +293,7 @@ _csw_cmd_pin() {
   selected=$(printf '%s\n' "${accounts[@]}" | _csw_pick "${header}")
   [[ -z "${selected}" ]] && return 0
 
-  echo "${selected}" > .claude-account
-
-  # 중앙 레지스트리에 경로 등록 (중복 방지)
+  # 중앙 레지스트리에만 경로 등록 (중복 방지)
   local pins_file="${_CSW_ACCOUNTS}/.pins/${selected}"
   mkdir -p "${_CSW_ACCOUNTS}/.pins"
   grep -qxF "${PWD}" "${pins_file}" 2>/dev/null || echo "${PWD}" >> "${pins_file}"
@@ -409,7 +410,7 @@ _csw_cmd_status() {
   local project_account
   project_account=$(_csw_find_project_account 2>/dev/null)
   if [[ -n "${project_account}" ]]; then
-    printf "$(_csw_msg project_account): \033[36m%s\033[0m  (.claude-account)\n" "${project_account}"
+    printf "$(_csw_msg project_account): \033[36m%s\033[0m\n" "${project_account}"
     _csw_account_exists "${project_account}" || \
       printf "$(_csw_msg warn_not_saved)\n" "${project_account}"
   fi
@@ -442,10 +443,8 @@ _csw_cmd_status() {
     local -a valid_paths=()
     local path
     while IFS= read -r path; do
-      if [[ -f "${path}/.claude-account" ]] && \
-         { local _pin=$(<"${path}/.claude-account"); [[ "${_pin//[[:space:]]/}" == "${acc}" ]]; }; then
-        valid_paths+=("${path}")
-      fi
+      [[ -z "${path}" ]] && continue
+      [[ -d "${path}" ]] && valid_paths+=("${path}")
     done < "${pins_file}"
 
     [[ ${#valid_paths[@]} -eq 0 ]] && continue
