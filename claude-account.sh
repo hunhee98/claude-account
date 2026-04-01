@@ -435,17 +435,34 @@ _csw_cmd_status() {
     else
       printf "  \033[2m%s\033[0m%b\n" "${acc}" "${label}"
     fi
+  done
 
+  # 핀된 프로젝트 목록
+  echo ""
+  printf "\033[2m$(_csw_msg pinned_projects)\033[0m\n"
+  for acc in "${accounts[@]}"; do
     local pins_file="${_CSW_ACCOUNTS}/.pins/${acc}"
     [[ -f "${pins_file}" ]] || continue
 
+    local -a valid_paths=()
     local path
     while IFS= read -r path; do
       if [[ -f "${path}/.claude-account" ]] && \
          { local _pin=$(<"${path}/.claude-account"); [[ "${_pin//[[:space:]]/}" == "${acc}" ]]; }; then
-        printf "    \033[2m[pin]\033[0m  %s\n" "${path}"
+        valid_paths+=("${path}")
       fi
     done < "${pins_file}"
+
+    [[ ${#valid_paths[@]} -eq 0 ]] && continue
+
+    if [[ "${acc}" == "${current}" ]]; then
+      printf "  \033[1m%s\033[0m\n" "${acc}"
+    else
+      printf "  \033[2m%s\033[0m\n" "${acc}"
+    fi
+    for path in "${valid_paths[@]}"; do
+      printf "    \033[2m→\033[0m  %s\n" "${path}"
+    done
   done
 }
 
