@@ -37,7 +37,7 @@ _csw_msg() {
     [add_name_invalid]="이름에 '/' 또는 '\\'는 사용할 수 없습니다."
     [add_overwrite]="계정이 이미 존재합니다. 덮어쓰시겠습니까? (y/N): "
     [add_overwrite_retry]="다른 이름을 입력하세요."
-    [add_done]="계정이 추가되었습니다."
+    [add_done]="계정 저장 완료!"
     [add_login_fail]="오류: 로그인이 완료되지 않은 것 같습니다."
     [delete_no_deletable]="삭제 가능한 계정이 없습니다. (기본 계정은 삭제 불가)"
     [delete_default_excluded]="기본 계정 삭제 불가 (목록에서 제외됨)"
@@ -50,6 +50,8 @@ _csw_msg() {
     [project_label]="프로젝트"
     [current_pin]="현재 고정"
     [pinned_projects]="고정된 프로젝트"
+    [account_list]="계정 목록"
+    [pinned_label]="pin"
     [help_title]="사용법: claude account [add|delete|pin|status]"
     [help_account]="  claude account         계정 목록 및 전환"
     [help_add]="  claude account add     새 계정 추가"
@@ -81,7 +83,7 @@ _csw_msg() {
     [add_name_invalid]="Name cannot contain '/' or '\\'."
     [add_overwrite]="Account already exists. Overwrite? (y/N): "
     [add_overwrite_retry]="Please enter a different name."
-    [add_done]="Account added."
+    [add_done]="Account saved."
     [add_login_fail]="Error: Login does not appear to have completed."
     [delete_no_deletable]="No deletable accounts. (Default account cannot be deleted)"
     [delete_default_excluded]="Default account excluded from list"
@@ -94,6 +96,8 @@ _csw_msg() {
     [project_label]="Project"
     [current_pin]="Current pin"
     [pinned_projects]="Pinned projects"
+    [account_list]="Accounts"
+    [pinned_label]="pin"
     [help_title]="Usage: claude account [add|delete|pin|status]"
     [help_account]="  claude account         Account list & switch"
     [help_add]="  claude account add     Add new account"
@@ -163,6 +167,12 @@ _csw_make_stub() {
   if [[ ! -L "${stub}/Library" ]] || [[ ! -e "${stub}/Library" ]]; then
     ln -sf "${HOME}/Library" "${stub}/Library"
   fi
+}
+
+_csw_account_email() {
+  local json="${_CSW_ACCOUNTS}/${1}/.claude.json"
+  [[ -f "${json}" ]] || return
+  grep -o '"emailAddress": *"[^"]*"' "${json}" 2>/dev/null | head -1 | sed 's/.*": *"//' | sed 's/"$//'
 }
 
 _csw_find_project_account() {
@@ -293,23 +303,9 @@ _csw_cmd_pin() {
 _csw_cmd_add() {
   echo ""
   printf "\033[1m[claude account] $(_csw_msg add_title)\033[0m\n"
-  _csw_msg add_desc
   echo ""
 
-  local tmp_home
-  tmp_home=$(mktemp -d)
-  mkdir -p "${tmp_home}/.claude"
-
-  _csw_msg add_running
-  HOME="${tmp_home}" command claude
-
-  if [[ -z "$(ls -A "${tmp_home}/.claude" 2>/dev/null)" ]]; then
-    rm -rf "${tmp_home}"
-    _csw_msg add_login_fail >&2
-    return 1
-  fi
-
-  echo ""
+  # 1. 계정 이름 먼저 받기
   local name
   while true; do
     printf "$(_csw_msg add_name_prompt)"
@@ -328,6 +324,24 @@ _csw_cmd_add() {
     break
   done
 
+  # 2. 로그인
+  echo ""
+  _csw_msg add_desc
+  echo ""
+  _csw_msg add_running
+
+  local tmp_home
+  tmp_home=$(mktemp -d)
+  mkdir -p "${tmp_home}/.claude"
+  HOME="${tmp_home}" command claude
+
+  if [[ -z "$(ls -A "${tmp_home}/.claude" 2>/dev/null)" ]]; then
+    rm -rf "${tmp_home}"
+    _csw_msg add_login_fail >&2
+    return 1
+  fi
+
+  # 3. 저장
   rm -rf "${_CSW_ACCOUNTS}/${name}"
   cp -r "${tmp_home}/.claude" "${_CSW_ACCOUNTS}/${name}"
   [[ -f "${tmp_home}/.claude.json" ]] && cp "${tmp_home}/.claude.json" "${_CSW_ACCOUNTS}/${name}/.claude.json"
@@ -335,7 +349,16 @@ _csw_cmd_add() {
   _csw_make_stub "${name}"
 
   echo "${name}" > "${_CSW_CURRENT}"
-  printf "[claude account] '\033[1m%s\033[0m' $(_csw_msg add_done)\n" "${name}"
+
+  local email
+  email=$(_csw_account_email "${name}")
+  echo ""
+  printf "[claude account] $(_csw_msg add_done)\n"
+  if [[ -n "${email}" ]]; then
+    printf "  \033[1m%s\033[0m  \033[2m(%s)\033[0m\n" "${name}" "${email}"
+  else
+    printf "  \033[1m%s\033[0m\n" "${name}"
+  fi
 }
 
 _csw_cmd_delete() {
@@ -400,32 +423,29 @@ _csw_cmd_status() {
   [[ ${#accounts[@]} -eq 0 ]] && return
 
   echo ""
-  printf "\033[2m$(_csw_msg pinned_projects)\033[0m\n"
-  local acc
+  printf "\033[2m$(_csw_msg account_list)\033[0m\n"
+  local acc email label
   for acc in "${accounts[@]}"; do
+    email=$(_csw_account_email "${acc}")
+    label=""
+    [[ -n "${email}" ]] && label="  \033[2m${email}\033[0m"
+
+    if [[ "${acc}" == "${current}" ]]; then
+      printf "  \033[1m%s\033[0m%b\n" "${acc}" "${label}"
+    else
+      printf "  \033[2m%s\033[0m%b\n" "${acc}" "${label}"
+    fi
+
     local pins_file="${_CSW_ACCOUNTS}/.pins/${acc}"
     [[ -f "${pins_file}" ]] || continue
 
-    local -a valid_paths=()
     local path
     while IFS= read -r path; do
-      # .claude-account 가 이 계정을 가리키는 경우만 표시
       if [[ -f "${path}/.claude-account" ]] && \
          { local _pin=$(<"${path}/.claude-account"); [[ "${_pin//[[:space:]]/}" == "${acc}" ]]; }; then
-        valid_paths+=("${path}")
+        printf "    \033[2m[pin]\033[0m  %s\n" "${path}"
       fi
     done < "${pins_file}"
-
-    [[ ${#valid_paths[@]} -eq 0 ]] && continue
-
-    if [[ "${acc}" == "${current}" ]]; then
-      printf "\033[1m%s\033[0m\n" "${acc}"
-    else
-      printf "\033[2m%s\033[0m\n" "${acc}"
-    fi
-    for path in "${valid_paths[@]}"; do
-      printf "  \033[2m→\033[0m  %s\n" "${path}"
-    done
   done
 }
 
