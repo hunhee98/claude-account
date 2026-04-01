@@ -53,7 +53,7 @@ cd ~/work/my-project
 claude account pin        # select an account to pin
 ```
 
-This writes a `.claude-account` file in the project root. Any `claude` invocation inside this directory tree will use the pinned account automatically, regardless of the global default. The file is discovered by walking up from the current directory, so it works from any subdirectory.
+The project path is recorded in `~/.claude-accounts/.pins/` — nothing is written to your project directory. Any `claude` invocation inside this directory tree will use the pinned account automatically, regardless of the global default.
 
 ## How it works
 
@@ -76,6 +76,17 @@ On every `claude` invocation, the wrapper:
 1. Looks for a `.claude-account` file in the current directory (and parents)
 2. Falls back to the global default in `~/.claude-accounts/.current`
 3. Sets `HOME` to the matching stub directory, then launches `claude`
+
+## Scope
+
+`claude-account` handles credentials only. It does not control what Claude Code is permitted to do once launched — file access, tool availability, and all other behavioral policies remain entirely up to Claude Code's own settings.
+
+If you need to prevent one account (e.g. personal) from accessing paths or tools reserved for another (e.g. work), configure those restrictions through Claude Code's built-in mechanisms:
+
+- **Per-project rules:** add a `CLAUDE.md` or `.claude/settings.json` to the project root
+- **Allowed / blocked tools:** use the `allowedTools` / `disabledTools` fields in settings
+
+`claude-account` puts the right credentials in place — what Claude Code is allowed to do with them is up to you.
 
 ## Requirements
 
