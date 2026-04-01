@@ -180,14 +180,13 @@ _csw_find_project_account() {
   local pins_dir="${_CSW_ACCOUNTS}/.pins"
   [[ ! -d "${pins_dir}" ]] && return 1
 
-  local acc
+  local acc path
   for acc in "${pins_dir}"/*; do
     [[ ! -f "${acc}" ]] && continue
-    local path
     while IFS= read -r path; do
       [[ -z "${path}" ]] && continue
       if [[ "${current_dir}" == "${path}" ]] || [[ "${current_dir}" == "${path}"/* ]]; then
-        basename "${acc}"
+        echo "${acc##*/}"
         return 0
       fi
     done < "${acc}"
