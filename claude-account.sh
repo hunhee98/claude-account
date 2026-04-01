@@ -155,6 +155,9 @@ _csw_make_stub() {
   if [[ ! -L "${stub}/.claude" ]] || [[ ! -e "${stub}/.claude" ]]; then
     ln -sf "${_CSW_ACCOUNTS}/${name}" "${stub}/.claude"
   fi
+  if [[ ! -L "${stub}/.claude.json" ]] || [[ ! -e "${stub}/.claude.json" ]]; then
+    ln -sf "${_CSW_ACCOUNTS}/${name}/.claude.json" "${stub}/.claude.json"
+  fi
 }
 
 _csw_find_project_account() {
@@ -320,6 +323,7 @@ _csw_cmd_add() {
 
   rm -rf "${_CSW_ACCOUNTS}/${name}"
   cp -r "${tmp_home}/.claude" "${_CSW_ACCOUNTS}/${name}"
+  [[ -f "${tmp_home}/.claude.json" ]] && cp "${tmp_home}/.claude.json" "${_CSW_ACCOUNTS}/${name}/.claude.json"
   rm -rf "${tmp_home}"
   _csw_make_stub "${name}"
 
