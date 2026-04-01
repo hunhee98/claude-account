@@ -49,6 +49,7 @@ _csw_msg() {
     [err_not_found]="오류: '%s' 계정이 존재하지 않습니다."
     [project_label]="프로젝트"
     [current_pin]="현재 고정"
+    [pinned_projects]="고정된 프로젝트"
     [help_title]="사용법: claude account [add|delete|pin|status]"
     [help_account]="  claude account         계정 목록 및 전환"
     [help_add]="  claude account add     새 계정 추가"
@@ -92,6 +93,7 @@ _csw_msg() {
     [err_not_found]="Error: account '%s' does not exist."
     [project_label]="Project"
     [current_pin]="Current pin"
+    [pinned_projects]="Pinned projects"
     [help_title]="Usage: claude account [add|delete|pin|status]"
     [help_account]="  claude account         Account list & switch"
     [help_add]="  claude account add     Add new account"
@@ -141,7 +143,7 @@ _csw_current() {
 }
 
 _csw_list_accounts() {
-  find "${_CSW_ACCOUNTS}" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort
+  find "${_CSW_ACCOUNTS}" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | grep -v '^\.' | sort
 }
 
 _csw_account_exists() {
@@ -158,13 +160,18 @@ _csw_make_stub() {
   if [[ ! -L "${stub}/.claude.json" ]] || [[ ! -e "${stub}/.claude.json" ]]; then
     ln -sf "${_CSW_ACCOUNTS}/${name}/.claude.json" "${stub}/.claude.json"
   fi
+  if [[ ! -L "${stub}/Library" ]] || [[ ! -e "${stub}/Library" ]]; then
+    ln -sf "${HOME}/Library" "${stub}/Library"
+  fi
 }
 
 _csw_find_project_account() {
   local dir="${PWD}"
   while [[ "${dir}" != "/" ]]; do
     if [[ -f "${dir}/.claude-account" ]]; then
-      tr -d '[:space:]' < "${dir}/.claude-account"
+      local val
+      val=$(<"${dir}/.claude-account")
+      echo "${val//[[:space:]]/}"
       return 0
     fi
     dir=$(dirname "${dir}")
@@ -307,7 +314,7 @@ _csw_cmd_add() {
   while true; do
     printf "$(_csw_msg add_name_prompt)"
     read -r name
-    name=$(echo "${name}" | tr -d '[:space:]')
+    name="${name//[[:space:]]/}"
 
     [[ -z "${name}" ]]       && { _csw_msg add_name_empty;   continue; }
     [[ "${name}" =~ [/\\] ]] && { _csw_msg add_name_invalid; continue; }
@@ -393,6 +400,7 @@ _csw_cmd_status() {
   [[ ${#accounts[@]} -eq 0 ]] && return
 
   echo ""
+  printf "\033[2m$(_csw_msg pinned_projects)\033[0m\n"
   local acc
   for acc in "${accounts[@]}"; do
     local pins_file="${_CSW_ACCOUNTS}/.pins/${acc}"
@@ -403,7 +411,7 @@ _csw_cmd_status() {
     while IFS= read -r path; do
       # .claude-account 가 이 계정을 가리키는 경우만 표시
       if [[ -f "${path}/.claude-account" ]] && \
-         [[ "$(tr -d '[:space:]' < "${path}/.claude-account")" == "${acc}" ]]; then
+         { local _pin=$(<"${path}/.claude-account"); [[ "${_pin//[[:space:]]/}" == "${acc}" ]]; }; then
         valid_paths+=("${path}")
       fi
     done < "${pins_file}"

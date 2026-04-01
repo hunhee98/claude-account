@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute sha256
+        id: sha
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz"
+          SHA=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: hunhee98/homebrew-claude-account
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Update Formula
+        run: |
+          TAG="${{ steps.sha.outputs.tag }}"
+          VERSION="${TAG#v}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+          URL="${{ steps.sha.outputs.url }}"
+
+          sed -i "s|url \".*\"|url \"$URL\"|" tap/Formula/claude-account.rb
+          sed -i "s|sha256 \".*\"|sha256 \"$SHA\"|" tap/Formula/claude-account.rb
+          sed -i "s|version \".*\"||" tap/Formula/claude-account.rb
+
+      - name: Commit and push
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/claude-account.rb
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "Update claude-account to ${{ steps.sha.outputs.tag }}"
+          git push
