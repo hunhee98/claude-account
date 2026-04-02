@@ -480,11 +480,6 @@ _csw_cmd_status() {
 claude() {
   _csw_ensure_dirs
 
-  if [[ "${1}" == "remote-control" ]]; then
-    /opt/homebrew/bin/claude "$@"
-    return
-  fi
-
   if [[ "${1}" == "--help" || "${1}" == "-h" ]]; then
     command claude "$@"
     printf "  %-50s%s\n" "account"        "Switch between saved accounts"
