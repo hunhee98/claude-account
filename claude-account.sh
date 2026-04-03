@@ -197,42 +197,105 @@ _csw_account_email() {
   done < "${json}"
 }
 
-# 계정의 최근 7일 output 토큰 합산 (python3 사용)
-# ccusage 방식 참고: requestId 기준 중복 제거, isApiErrorMessage 스킵
-_csw_account_tokens() {
-  local projects_dir="${_CSW_ACCOUNTS}/${1}/projects"
-  [[ -d "${projects_dir}" ]] || { echo 0; return }
-  python3 - "${projects_dir}" <<'PYEOF'
-import os, sys, json
-from datetime import datetime, timedelta, timezone
-week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-total = 0
-seen = set()
-base = sys.argv[1]
-for proj in os.listdir(base):
-    pp = os.path.join(base, proj)
-    if not os.path.isdir(pp): continue
-    for fname in os.listdir(pp):
-        if not fname.endswith('.jsonl'): continue
+# 계정별 비용 계산 (5시간 블록, LiteLLM 가격 캐시)
+# 사용: _csw_calc_costs <tmpfile> <account1> [account2 ...]
+# 결과: {"account": cost_usd, ...} JSON → tmpfile
+_csw_calc_costs() {
+  local _tmpfile="${1}"
+  shift
+  python3 - "${_CSW_ACCOUNTS}" "$@" > "${_tmpfile}" 2>/dev/null <<'PYEOF'
+import os, sys, json, time, urllib.request
+from datetime import datetime, timezone
+
+ACCOUNTS_DIR = sys.argv[1]
+NAMES        = sys.argv[2:]
+CACHE_FILE   = os.path.join(ACCOUNTS_DIR, ".pricing_cache.json")
+CACHE_TTL    = 86400  # 24시간
+
+FALLBACK = {
+    "claude-opus-4":     {"i": 15.00, "o": 75.00, "cw": 18.75, "cr": 1.50},
+    "claude-opus-4-5":   {"i": 15.00, "o": 75.00, "cw": 18.75, "cr": 1.50},
+    "claude-sonnet-4-5": {"i":  3.00, "o": 15.00, "cw":  3.75, "cr": 0.30},
+    "claude-sonnet-4":   {"i":  3.00, "o": 15.00, "cw":  3.75, "cr": 0.30},
+    "claude-haiku-4-5":  {"i":  0.80, "o":  4.00, "cw":  1.00, "cr": 0.08},
+    "claude-haiku-3-5":  {"i":  0.80, "o":  4.00, "cw":  1.00, "cr": 0.08},
+}
+
+def load_pricing():
+    if os.path.exists(CACHE_FILE):
         try:
-            with open(os.path.join(pp, fname)) as f:
-                for line in f:
-                    d = json.loads(line)
-                    if d.get('isApiErrorMessage'): continue
-                    msg = d.get('message')
-                    if not isinstance(msg, dict): continue
-                    usage = msg.get('usage')
-                    if not usage: continue
-                    request_id = d.get('requestId') or msg.get('id')
-                    if request_id:
-                        if request_id in seen: continue
-                        seen.add(request_id)
-                    ts = d.get('timestamp', '')
-                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-                    if dt >= week_ago:
-                        total += usage.get('output_tokens', 0)
+            with open(CACHE_FILE) as f:
+                c = json.load(f)
+            if time.time() - c.get("ts", 0) < CACHE_TTL:
+                return c["p"]
         except: pass
-print(total)
+    try:
+        url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = json.loads(r.read())
+        p = {}
+        for m, v in data.items():
+            if not m.startswith("claude"): continue
+            p[m] = {
+                "i":  (v.get("input_cost_per_token") or 0) * 1e6,
+                "o":  (v.get("output_cost_per_token") or 0) * 1e6,
+                "cw": (v.get("cache_creation_input_token_cost") or 0) * 1e6,
+                "cr": (v.get("cache_read_input_token_cost") or 0) * 1e6,
+            }
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump({"ts": time.time(), "p": p}, f)
+        return p
+    except:
+        return FALLBACK
+
+def get_price(p, model):
+    if model in p: return p[model]
+    for k in p:
+        if model.startswith(k) or k.startswith(model): return p[k]
+    return {"i": 3.0, "o": 15.0, "cw": 3.75, "cr": 0.30}
+
+def calc(name, pr):
+    d = os.path.join(ACCOUNTS_DIR, name, "projects")
+    if not os.path.isdir(d): return 0.0
+    now       = time.time()
+    blk_start = (now // 18000) * 18000  # 5시간 블록
+    total     = 0.0
+    seen      = set()
+    for root, _, files in os.walk(d):
+        for fn in files:
+            if not fn.endswith(".jsonl"): continue
+            try:
+                with open(os.path.join(root, fn)) as f:
+                    for line in f:
+                        rec = json.loads(line)
+                        if rec.get("isApiErrorMessage"): continue
+                        ts = rec.get("timestamp", "")
+                        try:
+                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            if dt.timestamp() < blk_start: continue
+                        except: continue
+                        msg = rec.get("message", {})
+                        if not isinstance(msg, dict): continue
+                        key = f"{msg.get('id','')}:{rec.get('requestId','')}"
+                        if key in seen: continue
+                        seen.add(key)
+                        if rec.get("costUSD") is not None:
+                            total += rec["costUSD"]; continue
+                        u = msg.get("usage")
+                        if not u: continue
+                        p2 = get_price(pr, msg.get("model", ""))
+                        total += (
+                            u.get("input_tokens", 0)                * p2["i"]  / 1e6 +
+                            u.get("output_tokens", 0)               * p2["o"]  / 1e6 +
+                            u.get("cache_creation_input_tokens", 0) * p2["cw"] / 1e6 +
+                            u.get("cache_read_input_tokens", 0)     * p2["cr"] / 1e6
+                        )
+            except: pass
+    return total
+
+pr = load_pricing()
+print(json.dumps({n: calc(n, pr) for n in NAMES}))
 PYEOF
 }
 
@@ -476,66 +539,128 @@ _csw_cmd_status() {
       printf "$(_csw_msg warn_not_saved)\n" "${project_account}"
   fi
 
-  # 계정별 핀된 프로젝트 목록
   local -a accounts=()
   while IFS= read -r line; do
     accounts+=("${line}")
   done < <(_csw_list_accounts)
-
   [[ ${#accounts[@]} -eq 0 ]] && return
 
   echo ""
   printf "\033[2m$(_csw_msg account_list)\033[0m\n"
 
-  # 계정별 토큰 집계 후 최댓값 계산
-  local -A _tokens=()
-  local _max_tokens=0 _t
+  # 이메일 미리 수집
+  local -A _emails=()
+  local acc
   for acc in "${accounts[@]}"; do
-    _t=$(_csw_account_tokens "${acc}")
-    _tokens[${acc}]="${_t}"
-    (( _t > _max_tokens )) && _max_tokens="${_t}"
+    _emails[$acc]=$(_csw_account_email "${acc}")
   done
 
-  local acc email label
+  # ── 1단계: 모든 내용 즉시 출력, 계정 줄 위치 기록 ────────────────────────
+  local -A _acc_line=()   # 계정별 출력 줄 번호 (0-indexed)
+  local _line=0
+
   for acc in "${accounts[@]}"; do
-    email=$(_csw_account_email "${acc}")
-    label=""
-    [[ -n "${email}" ]] && label="  \033[2m${email}\033[0m"
-
-    # 게이지 계산 (룩업 테이블)
-    local tok="${_tokens[${acc}]:-0}"
-    local pct=0
-    (( _max_tokens > 0 )) && pct=$(( tok * 100 / _max_tokens ))
-    local filled=$(( pct * 10 / 100 ))
-    local -a _bars=(
-      "░░░░░░░░░░" "▓░░░░░░░░░" "▓▓░░░░░░░░" "▓▓▓░░░░░░░"
-      "▓▓▓▓░░░░░░" "▓▓▓▓▓░░░░░" "▓▓▓▓▓▓░░░░" "▓▓▓▓▓▓▓░░░"
-      "▓▓▓▓▓▓▓▓░░" "▓▓▓▓▓▓▓▓▓░" "▓▓▓▓▓▓▓▓▓▓"
-    )
-    local bar="${_bars[$(( filled + 1 ))]}"
-
+    local _em="${_emails[$acc]:-}"
+    [[ -n "${_em}" ]] && _em="  \033[2m${_em}\033[0m"
     if [[ "${acc}" == "${current}" ]]; then
-      printf "  \033[1m%s\033[0m%b  \033[2m%s %d%%\033[0m\n" "${acc}" "${label}" "${bar}" "${pct}"
+      printf "  \033[1m%-20s\033[0m%b  \033[2m·\033[0m\033[K\n" "${acc}" "${_em}"
     else
-      printf "  \033[2m%s\033[0m%b  \033[2m%s %d%%\033[0m\n" "${acc}" "${label}" "${bar}" "${pct}"
+      printf "  \033[2m%-20s\033[0m%b  \033[2m·\033[0m\033[K\n" "${acc}" "${_em}"
     fi
+    _acc_line[$acc]=${_line}
+    (( _line++ ))
 
+    # 핀 정보 즉시 출력
     local pins_file="${_CSW_ACCOUNTS}/.pins/${acc}"
-    [[ -f "${pins_file}" ]] || continue
-
-    local -a valid_paths=() proj_path
-    while IFS= read -r proj_path; do
-      [[ -z "${proj_path}" ]] && continue
-      [[ -d "${proj_path}" ]] && valid_paths+=("${proj_path}")
-    done < "${pins_file}"
-
-    [[ ${#valid_paths[@]} -eq 0 ]] && continue
-
-    printf "    \033[2m[$(_csw_msg pinned_label)]\033[0m\n"
-    for proj_path in "${valid_paths[@]}"; do
-      printf "    \033[2m→\033[0m  %s\n" "${proj_path}"
-    done
+    if [[ -f "${pins_file}" ]]; then
+      local -a valid_paths=() proj_path
+      while IFS= read -r proj_path; do
+        [[ -z "${proj_path}" ]] && continue
+        [[ -d "${proj_path}" ]] && valid_paths+=("${proj_path}")
+      done < "${pins_file}"
+      if [[ ${#valid_paths[@]} -gt 0 ]]; then
+        printf "    \033[2m[$(_csw_msg pinned_label)]\033[0m\n"
+        (( _line++ ))
+        for proj_path in "${valid_paths[@]}"; do
+          printf "    \033[2m→\033[0m  %s\n" "${proj_path}"
+          (( _line++ ))
+        done
+      fi
+    fi
   done
+
+  local _total=${_line}  # 커서는 출력된 줄 수만큼 아래
+
+  # 게이지 컬럼만 in-place 업데이트하는 헬퍼
+  # 커서를 해당 계정 줄로 이동 → 게이지만 덮어씀 → 원위치
+  _csw_write_gauge() {
+    local _acc="${1}" _gauge="${2}"
+    local _dist=$(( _total - _acc_line[$_acc] ))
+    local _em="${_emails[$_acc]:-}"
+    [[ -n "${_em}" ]] && _em="  \033[2m${_em}\033[0m"
+    printf "\033[%dA\r" "${_dist}"
+    if [[ "${_acc}" == "${current}" ]]; then
+      printf "  \033[1m%-20s\033[0m%b  \033[2m%s\033[0m\033[K" "${_acc}" "${_em}" "${_gauge}"
+    else
+      printf "  \033[2m%-20s\033[0m%b  \033[2m%s\033[0m\033[K" "${_acc}" "${_em}" "${_gauge}"
+    fi
+    printf "\033[%dB" "${_dist}"
+  }
+
+  # ── 2단계: 백그라운드 비용 계산 ───────────────────────────────────────────
+  local _tmpfile
+  _tmpfile=$(mktemp)
+  _csw_calc_costs "${_tmpfile}" "${accounts[@]}" &
+  local _bg_pid=$!
+
+  # ── 3단계: 게이지 영역만 로딩 애니메이션 ─────────────────────────────────
+  local -a _frames=("·" "··" "···")
+  local _fi=0
+  while kill -0 "${_bg_pid}" 2>/dev/null; do
+    local _frame="${_frames[$(( _fi % 3 + 1 ))]}"
+    for acc in "${accounts[@]}"; do
+      _csw_write_gauge "${acc}" "${_frame}"
+    done
+    sleep 0.2
+    (( _fi++ ))
+  done
+  wait "${_bg_pid}"
+
+  # ── 4단계: 게이지 영역에 최종 결과 렌더 ──────────────────────────────────
+  local -a _bars=(
+    "░░░░░░░░░░" "▓░░░░░░░░░" "▓▓░░░░░░░░" "▓▓▓░░░░░░░"
+    "▓▓▓▓░░░░░░" "▓▓▓▓▓░░░░░" "▓▓▓▓▓▓░░░░" "▓▓▓▓▓▓▓░░░"
+    "▓▓▓▓▓▓▓▓░░" "▓▓▓▓▓▓▓▓▓░" "▓▓▓▓▓▓▓▓▓▓"
+  )
+
+  if [[ -s "${_tmpfile}" ]]; then
+    local _result_json
+    _result_json=$(cat "${_tmpfile}")
+    local _gauge_lines
+    _gauge_lines=$(python3 - "${_result_json}" "${accounts[@]}" <<'PYEOF'
+import json, sys
+data  = json.loads(sys.argv[1])
+names = sys.argv[2:]
+mx    = max(data.values()) if data else 0
+for n in names:
+    c      = data.get(n, 0)
+    pct    = int(c / mx * 100) if mx > 0 else 0
+    filled = pct * 10 // 100
+    print(f"{n}\t{filled}\t{pct}\t${c:.4f}")
+PYEOF
+    )
+    while IFS=$'\t' read -r _name _filled _pct _cost; do
+      [[ -z "${_name}" ]] && continue
+      _csw_write_gauge "${_name}" "${_bars[$(( _filled + 1 ))]} ${_pct}%  ${_cost}"
+    done <<< "${_gauge_lines}"
+  else
+    for acc in "${accounts[@]}"; do
+      _csw_write_gauge "${acc}" "░░░░░░░░░░ 0%  \$0.0000"
+    done
+  fi
+  rm -f "${_tmpfile}"
+
+  printf "\n"
 }
 
 # ── claude 래퍼 (진입점) ──────────────────────────────────────────────────────
