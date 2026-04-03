@@ -525,6 +525,7 @@ _csw_cmd_delete() {
 }
 
 _csw_cmd_status() {
+  setopt LOCAL_OPTIONS NO_NOTIFY NO_MONITOR 2>/dev/null
   _csw_ensure_dirs
   local current
   current=$(_csw_current)
@@ -604,7 +605,8 @@ PYEOF
   for acc in "${accounts[@]}"; do
     local _em="${_emails[$acc]:-}"
     [[ -n "${_em}" ]] && _em="  \033[2m${_em}\033[0m"
-    local _gauge="${_gauge_map[$acc]:-░░░░░░░░░░ 0%  \$0.0000}"
+    local _gauge="${_gauge_map[$acc]}"
+    [[ -z "${_gauge}" ]] && _gauge="░░░░░░░░░░ 0%  \$0.0000"
     if [[ "${acc}" == "${current}" ]]; then
       printf "  \033[1m%-20s\033[0m%b  \033[2m%s\033[0m\n" "${acc}" "${_em}" "${_gauge}"
     else
